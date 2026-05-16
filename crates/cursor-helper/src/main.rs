@@ -122,8 +122,6 @@ fn start_mouse_hook_thread(port: u16, threshold: u8) {
 
     // spawn a thread which installs a low-level mouse hook and runs a message loop
     thread::spawn(move || unsafe {
-        use std::ptr::null_mut;
-
         static MOUSE_STATE: OnceCell<StdMutex<MouseState>> = OnceCell::new();
         MOUSE_STATE.get_or_init(|| StdMutex::new(MouseState::default()));
 
@@ -180,9 +178,15 @@ fn start_mouse_hook_thread(port: u16, threshold: u8) {
         }
 
         // install hook
-        let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0);
+        let hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0) {
+            Ok(h) => h,
+            Err(err) => {
+                eprintln!("failed to install mouse hook: {err:?}");
+                return;
+            }
+        };
         if hook.is_invalid() {
-            eprintln!("failed to install mouse hook");
+            eprintln!("failed to install mouse hook (invalid handle)");
             return;
         }
 
@@ -197,7 +201,6 @@ fn start_mouse_hook_thread(port: u16, threshold: u8) {
     });
 }
 
-#[derive(Default)]
 struct MouseState {
     holding: bool,
     start: Instant,
@@ -205,6 +208,12 @@ struct MouseState {
     last_y: i32,
     direction: i32,
     wiggles: u8,
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self { holding: false, start: Instant::now(), last_x: 0, last_y: 0, direction: 0, wiggles: 0 }
+    }
 }
 
 fn send_local_simulate(port: u16) -> io::Result<()> {
