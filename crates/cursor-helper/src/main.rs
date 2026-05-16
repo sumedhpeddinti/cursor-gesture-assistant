@@ -1,10 +1,12 @@
 use cursor_core::{default_config_path, AppConfig, HelperCommand, HelperReply, HelperStatus};
-use std::{io::{self, BufRead, BufReader, Write}, net::{TcpListener, TcpStream}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread, time::Duration};
 use once_cell::sync::OnceCell;
-use windows::Win32::Foundation::{LRESULT, WPARAM, LPARAM, POINT};
-use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, CallNextHookEx, UnhookWindowsHookEx, DispatchMessageW, GetMessageW, TranslateMessage, MSG, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_MOUSE_LL, HC_ACTION, MSLLHOOKSTRUCT_0, WH_KEYBOARD_LL, LOWLEVELHOOKSTRUCT, HHOOK, WH_CALLWNDPROC};
-use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
-use windows::Win32::System::Threading::CreateThread;
+use std::{io::{self, BufRead, BufReader, Write}, net::{TcpListener, TcpStream}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::sync::Mutex as StdMutex;
+use windows::Win32::Foundation::{LRESULT, WPARAM, LPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, CallNextHookEx, UnhookWindowsHookEx, DispatchMessageW, GetMessageW, TranslateMessage, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL, HC_ACTION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+
+static HOOK_PORT: OnceCell<u16> = OnceCell::new();
+static HOOK_THRESHOLD: OnceCell<u8> = OnceCell::new();
 
 #[derive(Debug)]
 struct HelperRuntime {
@@ -57,9 +59,6 @@ fn main() -> io::Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     // start the global mouse hook thread to detect left-click + wiggle gestures
     start_mouse_hook_thread(config.helper_port, config.gesture_threshold);
-
-    static HOOK_PORT: OnceCell<u16> = OnceCell::new();
-    static HOOK_THRESHOLD: OnceCell<u8> = OnceCell::new();
 
     println!("cursor-helper listening on 127.0.0.1:{}", config.helper_port);
 
