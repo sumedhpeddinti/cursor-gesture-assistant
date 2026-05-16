@@ -1,5 +1,10 @@
 use cursor_core::{default_config_path, AppConfig, HelperCommand, HelperReply, HelperStatus};
 use std::{io::{self, BufRead, BufReader, Write}, net::{TcpListener, TcpStream}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread, time::Duration};
+use once_cell::sync::OnceCell;
+use windows::Win32::Foundation::{LRESULT, WPARAM, LPARAM, POINT};
+use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, CallNextHookEx, UnhookWindowsHookEx, DispatchMessageW, GetMessageW, TranslateMessage, MSG, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_MOUSE_LL, HC_ACTION, MSLLHOOKSTRUCT_0, WH_KEYBOARD_LL, LOWLEVELHOOKSTRUCT, HHOOK, WH_CALLWNDPROC};
+use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+use windows::Win32::System::Threading::CreateThread;
 
 #[derive(Debug)]
 struct HelperRuntime {
@@ -50,6 +55,11 @@ fn main() -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let runtime = Arc::new(Mutex::new(HelperRuntime::new(config.clone())));
     let running = Arc::new(AtomicBool::new(true));
+    // start the global mouse hook thread to detect left-click + wiggle gestures
+    start_mouse_hook_thread(config.helper_port, config.gesture_threshold);
+
+    static HOOK_PORT: OnceCell<u16> = OnceCell::new();
+    static HOOK_THRESHOLD: OnceCell<u8> = OnceCell::new();
 
     println!("cursor-helper listening on 127.0.0.1:{}", config.helper_port);
 
@@ -104,5 +114,106 @@ fn handle_client(stream: TcpStream, runtime: Arc<Mutex<HelperRuntime>>, running:
     writer.write_all(payload.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()?;
+    Ok(())
+}
+
+fn start_mouse_hook_thread(port: u16, threshold: u8) {
+    HOOK_PORT.set(port).ok();
+    HOOK_THRESHOLD.set(threshold).ok();
+
+    // spawn a thread which installs a low-level mouse hook and runs a message loop
+    thread::spawn(move || unsafe {
+        use std::ptr::null_mut;
+
+        static MOUSE_STATE: OnceCell<StdMutex<MouseState>> = OnceCell::new();
+        MOUSE_STATE.get_or_init(|| StdMutex::new(MouseState::default()));
+
+        extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+            if n_code == HC_ACTION as i32 {
+                unsafe {
+                    let port = HOOK_PORT.get().copied().unwrap_or(48881);
+                    let threshold = HOOK_THRESHOLD.get().copied().unwrap_or(12);
+                    let state = MOUSE_STATE.get().expect("mouse state");
+                    let mut s = state.lock().unwrap();
+
+                    let ms_ptr = l_param.0 as *const MSLLHOOKSTRUCT;
+                    if !ms_ptr.is_null() {
+                        let ms = *ms_ptr;
+                        match w_param.0 as u32 {
+                            WM_LBUTTONDOWN => {
+                                s.holding = true;
+                                s.start = Instant::now();
+                                s.last_x = ms.pt.x;
+                                s.last_y = ms.pt.y;
+                                s.direction = 0;
+                                s.wiggles = 0;
+                            }
+                            WM_MOUSEMOVE => {
+                                if s.holding {
+                                    let dx = ms.pt.x - s.last_x;
+                                    let dy = ms.pt.y - s.last_y;
+                                    let dist = (dx*dx + dy*dy) as f64;
+                                    let dir = if dx.abs() > dy.abs() { if dx>0 {1} else {-1} } else { if dy>0 {1} else {-1} };
+                                    if s.direction == 0 {
+                                        s.direction = dir;
+                                    } else if dir != s.direction {
+                                        s.wiggles += 1;
+                                        s.direction = dir;
+                                    }
+                                    s.last_x = ms.pt.x;
+                                    s.last_y = ms.pt.y;
+                                    if s.wiggles >= 3 && dist > (threshold as i32 * threshold as i32) as f64 {
+                                        // trigger gesture
+                                        let _ = send_local_simulate(port);
+                                        s.holding = false;
+                                    }
+                                }
+                            }
+                            WM_LBUTTONUP => {
+                                s.holding = false;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+        }
+
+        // install hook
+        let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0);
+        if hook.is_invalid() {
+            eprintln!("failed to install mouse hook");
+            return;
+        }
+
+        // message loop to keep the hook alive
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).0 != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        let _ = UnhookWindowsHookEx(hook);
+    });
+}
+
+#[derive(Default)]
+struct MouseState {
+    holding: bool,
+    start: Instant,
+    last_x: i32,
+    last_y: i32,
+    direction: i32,
+    wiggles: u8,
+}
+
+fn send_local_simulate(port: u16) -> io::Result<()> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    let payload = serde_json::to_string(&HelperCommand::SimulateGesture)
+        .map_err(|error| io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    stream.write_all(payload.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
     Ok(())
 }
