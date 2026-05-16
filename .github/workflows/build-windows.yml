@@ -1,0 +1,71 @@
+name: Build Windows binaries
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry and git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Setup Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          override: true
+
+      - name: Build release (workspace)
+        run: cargo build --release --workspace
+
+      - name: Collect built binaries and package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $bins = @(
+            "target\release\cursor-tray.exe",
+            "target\release\cursor-helper.exe",
+            "target\release\cursor-settings.exe"
+          )
+          $existing = $bins | Where-Object { Test-Path $_ }
+          if (-not $existing) {
+            Write-Host "No built binaries found. Listing target\release:"
+            Get-ChildItem -Path target\release | Format-List
+            exit 1
+          }
+          $zip = "artifacts\cursor-windows.zip"
+          Compress-Archive -Path $existing -DestinationPath $zip -Force
+          Write-Host "Packaged: $zip"
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-windows-zip
+          path: artifacts/cursor-windows.zip
+
+      - name: Upload individual binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-windows-binaries
+          path: |
+            target/release/cursor-tray.exe
+            target/release/cursor-helper.exe
+            target/release/cursor-settings.exe

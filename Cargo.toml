@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cursor-core",
+    "crates/cursor-helper",
+    "crates/cursor-settings",
+    "crates/cursor-tray",
+]
